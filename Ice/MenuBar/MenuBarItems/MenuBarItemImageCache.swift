@@ -105,6 +105,7 @@ final class MenuBarItemImageCache: ObservableObject {
         }
 
         let items = await appState.itemManager.itemCache[section]
+        let isMenuBarHiddenBySystem = await appState.menuBarManager.isMenuBarHiddenBySystemUserDefaults
 
         var images = [MenuBarItemInfo: CGImage]()
         let backingScaleFactor = screen.backingScaleFactor
@@ -120,9 +121,11 @@ final class MenuBarItemImageCache: ObservableObject {
         for item in items {
             let windowID = item.windowID
             guard
-                // Use the most up-to-date window frame.
+                // Use the most up-to-date window frame. The system parks automatically
+                // hidden menu bar items immediately above the display.
                 let itemFrame = Bridging.getWindowFrame(for: windowID),
-                itemFrame.minY == displayBounds.minY
+                itemFrame.minY == displayBounds.minY ||
+                    (isMenuBarHiddenBySystem && itemFrame.maxY == displayBounds.minY)
             else {
                 continue
             }
