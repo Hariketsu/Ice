@@ -1286,6 +1286,47 @@ extension MenuBarItemManager {
         }
     }
 
+    /// Sets whether the system menu bar is temporarily visible on the given screen.
+    @discardableResult
+    private func setMenuBarVisibilityOverride(_ enabled: Bool, on screen: NSScreen) -> Bool {
+        guard let setVisibilityOverride = SkyLight.setMenuBarVisibilityOverrideOnDisplay else {
+            Logger.itemManager.error("SkyLight menu bar visibility override is unavailable")
+            return false
+        }
+        setVisibilityOverride(
+            CGSMainConnectionID(),
+            screen.displayID,
+            enabled
+        )
+        return true
+    }
+
+    /// Temporarily reveals the system menu bar and waits until it can be used.
+    private func revealSystemMenuBar(for item: MenuBarItem, on screen: NSScreen) async throws {
+        guard setMenuBarVisibilityOverride(true, on: screen) else {
+            throw EventError(code: .couldNotComplete, item: item)
+        }
+
+        do {
+            let displayBounds = CGDisplayBounds(screen.displayID)
+            for _ in 0..<50 {
+                if
+                    let appState,
+                    let frame = Bridging.getWindowFrame(for: item.windowID),
+                    frame.minY == displayBounds.minY,
+                    appState.menuBarManager.getApplicationMenuFrame(for: screen.displayID) != nil
+                {
+                    return
+                }
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            throw EventError(code: .otherTimeout, item: item)
+        } catch {
+            setMenuBarVisibilityOverride(false, on: screen)
+            throw error
+        }
+    }
+
     /// Temporarily shows the given item.
     ///
     /// The item is cached alongside a destination that it will be automatically returned
@@ -1297,18 +1338,16 @@ extension MenuBarItemManager {
     ///   - clickWhenFinished: A Boolean value that indicates whether the item should be
     ///     clicked once movement is finished.
     ///   - mouseButton: The mouse button of the click.
-    func tempShowItem(_ item: MenuBarItem, clickWhenFinished: Bool, mouseButton: CGMouseButton) {
+    func tempShowItem(_ item: MenuBarItem, clickWhenFinished: Bool, mouseButton: CGMouseButton) async {
         if
             let latest = MenuBarItem(windowID: item.windowID),
             latest.isOnScreen
         {
             if clickWhenFinished {
-                Task {
-                    do {
-                        try await click(item: latest, with: mouseButton)
-                    } catch {
-                        Logger.itemManager.error("ERROR: \(error)")
-                    }
+                do {
+                    try await click(item: latest, with: mouseButton)
+                } catch {
+                    Logger.itemManager.error("ERROR: \(error)")
                 }
             }
             return
@@ -1316,9 +1355,28 @@ extension MenuBarItemManager {
 
         guard
             let appState,
-            let screen = NSScreen.main,
-            let applicationMenuFrame = appState.menuBarManager.getApplicationMenuFrame(for: screen.displayID)
+            let screen = NSScreen.main
         else {
+            Logger.itemManager.warning("No main screen, so not showing \(item.logString)")
+            return
+        }
+
+        let overridesSystemMenuBar = appState.menuBarManager.isMenuBarHiddenBySystemUserDefaults
+        if overridesSystemMenuBar {
+            do {
+                try await revealSystemMenuBar(for: item, on: screen)
+            } catch {
+                Logger.itemManager.error("Failed to reveal the system menu bar for \(item.logString) (error: \(error))")
+                return
+            }
+        }
+        defer {
+            if overridesSystemMenuBar {
+                setMenuBarVisibilityOverride(false, on: screen)
+            }
+        }
+
+        guard let applicationMenuFrame = appState.menuBarManager.getApplicationMenuFrame(for: screen.displayID) else {
             Logger.itemManager.warning("No application menu frame, so not showing \(item.logString)")
             return
         }
@@ -1357,40 +1415,49 @@ extension MenuBarItemManager {
 
         let initialWindows = WindowInfo.getOnScreenWindows()
 
-        Task {
-            if clickWhenFinished {
-                do {
-                    try await slowMove(item: item, to: .leftOfItem(targetItem))
-                    try await click(item: item, with: mouseButton)
-                } catch {
-                    Logger.itemManager.error("ERROR: \(error)")
-                }
-            } else {
-                do {
-                    try await move(item: item, to: .leftOfItem(targetItem))
-                } catch {
-                    Logger.itemManager.error("ERROR: \(error)")
-                }
+        if clickWhenFinished {
+            do {
+                try await slowMove(item: item, to: .leftOfItem(targetItem))
+                try await click(item: item, with: mouseButton)
+            } catch {
+                Logger.itemManager.error("ERROR: \(error)")
             }
-
-            try? await Task.sleep(for: .milliseconds(100))
-
-            let currentWindows = WindowInfo.getOnScreenWindows()
-
-            let shownInterfaceWindow = currentWindows.first { currentWindow in
-                currentWindow.ownerPID == item.ownerPID &&
-                !initialWindows.contains { initialWindow in
-                    currentWindow.windowID == initialWindow.windowID
-                }
+        } else {
+            do {
+                try await move(item: item, to: .leftOfItem(targetItem))
+            } catch {
+                Logger.itemManager.error("ERROR: \(error)")
             }
+        }
 
-            let context = TempShownItemContext(
-                info: item.info,
-                returnDestination: destination,
-                shownInterfaceWindow: shownInterfaceWindow
-            )
-            tempShownItemContexts.append(context)
-            runTempShownItemTimer(for: appState.settingsManager.advancedSettingsManager.tempShowInterval)
+        try? await Task.sleep(for: .milliseconds(100))
+
+        let currentWindows = WindowInfo.getOnScreenWindows()
+
+        let shownInterfaceWindow = currentWindows.first { currentWindow in
+            currentWindow.ownerPID == item.ownerPID &&
+            !initialWindows.contains { initialWindow in
+                currentWindow.windowID == initialWindow.windowID
+            }
+        }
+
+        let context = TempShownItemContext(
+            info: item.info,
+            returnDestination: destination,
+            shownInterfaceWindow: shownInterfaceWindow
+        )
+        tempShownItemContexts.append(context)
+        runTempShownItemTimer(for: appState.settingsManager.advancedSettingsManager.tempShowInterval)
+
+        // Keep the native menu bar visible while its menu or popover is open.
+        if
+            overridesSystemMenuBar,
+            let interfaceLayer = shownInterfaceWindow?.layer,
+            interfaceLayer == CGWindowLevelForKey(.popUpMenuWindow)
+        {
+            while !Task.isCancelled && context.isShowingInterface {
+                try? await Task.sleep(for: .milliseconds(100))
+            }
         }
     }
 
@@ -1425,10 +1492,35 @@ extension MenuBarItemManager {
 
         let items = MenuBarItem.getMenuBarItems(onScreenOnly: false, activeSpaceOnly: true)
 
+        var overriddenScreen: NSScreen?
+        if appState?.menuBarManager.isMenuBarHiddenBySystemUserDefaults == true {
+            guard
+                let screen = NSScreen.main,
+                let item = tempShownItemContexts.compactMap({ context in
+                    items.first { $0.info == context.info }
+                }).last
+            else {
+                Logger.itemManager.warning("No item available for revealing the system menu bar")
+                runTempShownItemTimer(for: 3)
+                return
+            }
+            do {
+                try await revealSystemMenuBar(for: item, on: screen)
+                overriddenScreen = screen
+            } catch {
+                Logger.itemManager.error("Failed to reveal the system menu bar for rehiding items (error: \(error))")
+                runTempShownItemTimer(for: 3)
+                return
+            }
+        }
+
         MouseCursor.hide()
 
         defer {
             MouseCursor.show()
+            if let overriddenScreen {
+                setMenuBarVisibilityOverride(false, on: overriddenScreen)
+            }
         }
 
         while let context = tempShownItemContexts.popLast() {

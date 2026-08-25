@@ -54,31 +54,6 @@ final class IceBarPanel: NSPanel {
         }
         .store(in: &c)
 
-        if
-            let section = appState?.menuBarManager.section(withName: .hidden),
-            let window = section.controlItem.window
-        {
-            window.publisher(for: \.frame)
-                .debounce(for: 0.1, scheduler: DispatchQueue.main)
-                .sink { [weak self, weak window] _ in
-                    guard
-                        let self,
-                        let appState,
-                        // Only continue if the menu bar is automatically hidden, as Ice
-                        // can't currently display its menu bar items.
-                        appState.menuBarManager.isMenuBarHiddenBySystemUserDefaults,
-                        let info = window.flatMap({ WindowInfo(windowID: CGWindowID($0.windowNumber)) }),
-                        // Window being offscreen means the menu bar is currently hidden.
-                        // Close the bar, as things will start to look weird if we don't.
-                        !info.isOnScreen
-                    else {
-                        return
-                    }
-                    close()
-                }
-                .store(in: &c)
-        }
-
         // Update the panel's origin whenever its size changes.
         publisher(for: \.frame)
             .map(\.size)
@@ -103,7 +78,10 @@ final class IceBarPanel: NSPanel {
         }
 
         func getOrigin(for iceBarLocation: IceBarLocation) -> CGPoint {
-            let menuBarHeight = screen.getMenuBarHeight() ?? 0
+            let menuBarHeight = screen.getMenuBarHeight()
+                ?? appState.menuBarManager.section(withName: .visible)?
+                    .controlItem.windowID.flatMap { Bridging.getWindowFrame(for: $0)?.height }
+                ?? NSStatusBar.system.thickness
             let originY = ((screen.frame.maxY - 1) - menuBarHeight) - frame.height
 
             var originForRightOfScreen: CGPoint {
@@ -208,7 +186,6 @@ private final class IceBarHostingView: NSHostingView<AnyView> {
                 .environmentObject(appState)
                 .environmentObject(appState.imageCache)
                 .environmentObject(appState.itemManager)
-                .environmentObject(appState.menuBarManager)
                 .environmentObject(colorManager)
                 .erasedToAnyView()
         )
@@ -236,7 +213,6 @@ private struct IceBarContentView: View {
     @EnvironmentObject var colorManager: IceBarColorManager
     @EnvironmentObject var itemManager: MenuBarItemManager
     @EnvironmentObject var imageCache: MenuBarItemImageCache
-    @EnvironmentObject var menuBarManager: MenuBarManager
     @State private var frame = CGRect.zero
     @State private var scrollIndicatorsFlashTrigger = 0
 
@@ -323,9 +299,6 @@ private struct IceBarContentView: View {
                 .foregroundStyle(.link)
             }
             .padding(.horizontal, 10)
-        } else if menuBarManager.isMenuBarHiddenBySystemUserDefaults {
-            Text("Ice cannot display menu bar items for automatically hidden menu bars")
-                .padding(.horizontal, 10)
         } else if imageCache.cacheFailed(for: section) {
             Text("Unable to display menu bar items")
                 .padding(.horizontal, 10)
@@ -364,7 +337,7 @@ private struct IceBarItemView: View {
             closePanel()
             Task {
                 try await Task.sleep(for: .milliseconds(25))
-                itemManager.tempShowItem(item, clickWhenFinished: true, mouseButton: .left)
+                await itemManager.tempShowItem(item, clickWhenFinished: true, mouseButton: .left)
             }
         }
     }
@@ -377,7 +350,7 @@ private struct IceBarItemView: View {
             closePanel()
             Task {
                 try await Task.sleep(for: .milliseconds(25))
-                itemManager.tempShowItem(item, clickWhenFinished: true, mouseButton: .right)
+                await itemManager.tempShowItem(item, clickWhenFinished: true, mouseButton: .right)
             }
         }
     }

@@ -4,6 +4,7 @@
 //
 
 import CoreGraphics
+import Darwin
 
 // MARK: - Bridged Types
 
@@ -77,6 +78,29 @@ func CGSSpaceGetType(
     _ cid: CGSConnectionID,
     _ sid: CGSSpaceID
 ) -> CGSSpaceType
+
+// MARK: - SkyLight Functions
+
+enum SkyLight {
+    typealias SetMenuBarVisibilityOverrideOnDisplay = @convention(c) (
+        CGSConnectionID,
+        CGDirectDisplayID,
+        Bool
+    ) -> Void
+
+    static let setMenuBarVisibilityOverrideOnDisplay: SetMenuBarVisibilityOverrideOnDisplay? = {
+        guard
+            let handle = dlopen(
+                "/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight",
+                RTLD_LAZY
+            ),
+            let symbol = dlsym(handle, "SLSSetMenuBarVisibilityOverrideOnDisplay")
+        else {
+            return nil
+        }
+        return unsafeBitCast(symbol, to: SetMenuBarVisibilityOverrideOnDisplay.self)
+    }()
+}
 
 // MARK: - CGSWindow Functions
 
