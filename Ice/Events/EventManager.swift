@@ -26,10 +26,10 @@ final class EventManager {
         }
         switch event.type {
         case .leftMouseDown:
-            handleShowOnClick()
+            handleShowOnClick(with: event)
             handleSmartRehide(with: event)
         case .rightMouseDown:
-            handleShowRightClickMenu()
+            handleShowRightClickMenu(with: event)
         default:
             break
         }
@@ -145,10 +145,11 @@ extension EventManager {
 
     // MARK: Handle Show On Click
 
-    private func handleShowOnClick() {
+    private func handleShowOnClick(with event: NSEvent) {
         guard
             let appState,
             appState.settingsManager.generalSettingsManager.showOnClick,
+            isEventTargetingMenuBar(event),
             isMouseInsideEmptyMenuBarSpace
         else {
             return
@@ -158,8 +159,15 @@ extension EventManager {
             // Short delay helps the toggle action feel more natural.
             try? await Task.sleep(for: .milliseconds(50))
 
+            guard
+                self.isEventTargetingMenuBar(event),
+                self.isMouseInsideEmptyMenuBarSpace
+            else {
+                return
+            }
+
             if NSEvent.modifierFlags == .control {
-                handleShowRightClickMenu()
+                handleShowRightClickMenu(with: event)
             } else if
                 NSEvent.modifierFlags == .option,
                 appState.settingsManager.advancedSettingsManager.canToggleAlwaysHiddenSection
@@ -253,10 +261,11 @@ extension EventManager {
 
     // MARK: Handle Show Right Click Menu
 
-    private func handleShowRightClickMenu() {
+    private func handleShowRightClickMenu(with event: NSEvent) {
         guard
             let appState,
             appState.settingsManager.advancedSettingsManager.showContextMenuOnRightClick,
+            isEventTargetingMenuBar(event),
             isMouseInsideEmptyMenuBarSpace,
             let mouseLocation = MouseCursor.locationAppKit
         else {
@@ -408,8 +417,11 @@ extension EventManager {
             return
         }
 
-        // Make sure the mouse is inside the menu bar.
-        guard isMouseInsideMenuBar else {
+        // Make sure the scroll targets the native menu bar.
+        guard
+            isEventTargetingMenuBar(event),
+            isMouseInsideMenuBar
+        else {
             return
         }
 
@@ -441,6 +453,32 @@ extension EventManager {
         } else {
             return NSScreen.main
         }
+    }
+
+    /// Returns whether the given event targets the native menu bar window.
+    private func isEventTargetingMenuBar(_ event: NSEvent) -> Bool {
+        guard let cgEvent = event.cgEvent else {
+            return false
+        }
+
+        let handlingWindowID = cgEvent.getIntegerValueField(
+            .mouseEventWindowUnderMousePointerThatCanHandleThisEvent
+        )
+        let windowIDValue = if handlingWindowID != 0 {
+            handlingWindowID
+        } else {
+            cgEvent.getIntegerValueField(.mouseEventWindowUnderMousePointer)
+        }
+
+        guard
+            windowIDValue > 0,
+            let windowID = CGWindowID(exactly: windowIDValue),
+            let screen = bestScreen,
+            let menuBarWindow = WindowInfo.getMenuBarWindow(for: screen.displayID)
+        else {
+            return false
+        }
+        return windowID == menuBarWindow.windowID
     }
 
     /// A Boolean value that indicates whether the mouse pointer is within
